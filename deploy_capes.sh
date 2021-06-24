@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 ################################
 ###### Container Versions ######
 ################################
@@ -39,16 +41,22 @@ for i in {etherpad_user_passphrase,etherpad_mysql_passphrase,etherpad_admin_pass
 
 # Set your IP address as a variable. This is for instructions below.
 IP="$(hostname -I | sed -e 's/[[:space:]]*$//')"
+IP="$(ip route get 8.8.8.8 | awk '{ print $7; }')"
 
 # Update your Host file
 echo "${IP} ${HOSTNAME}" | tee -a /etc/hosts
 
 # Update the landing page index file
-sed -i "s/host-ip/${IP}/" nginx/landing_page/index.html
+sed -i "s/host-ip/${HOSTNAME}/" nginx/landing_page/index.html
 
 # Create SSL certificates
+if false; then
 mkdir -p $(pwd)/nginx/ssl
 openssl req -newkey rsa:2048 -nodes -keyout $(pwd)/nginx/ssl/capes.key -x509 -sha256 -days 365 -out $(pwd)/nginx/ssl/capes.crt -subj "/C=US/ST=CAPES/L=CAPES/O=CAPES/OU=CAPES/CN=CAPES"
+fi
+
+cp -p "/etc/ssl/private/${HOSTNAME}.key" "$(pwd)/nginx/ssl/capes.key"
+cp -p "/etc/ssl/private/${HOSTNAME}.crt" "$(pwd)/nginx/ssl/capes.crt"
 
 ################################
 ########### Docker #############
@@ -59,9 +67,11 @@ if yum list installed "docker" >/dev/null 2>&1; then echo "Docker already instal
 # Create non-Root users to manage Docker
 # You'll still need to run sudo docker [command] until you log out and back in OR run "newgrp - docker"
 # The "newgrp - docker" command starts a subshell that prevents this autobuild script from completing, so we'll just keep using until a reboot.
-groupadd docker
-usermod -aG docker "${USER}"
-newgrp docker
+if ! getent group docker > /dev/null; then
+  groupadd docker
+  usermod -aG docker "${USER}"
+  newgrp docker
+fi
 
 # Set Docker to start on boot
 systemctl enable docker.service
@@ -70,8 +80,12 @@ systemctl enable docker.service
 systemctl start docker.service
 
 # Create the CAPES network and data volume
-docker network create capes
-docker volume create portainer_data
+if ! docker network inspect capes > /dev/null; then
+  docker network create capes
+fi
+if ! docker volume inspect portainer_data > /dev/null; then
+  docker volume create portainer_data
+fi
 
 # Create & update Elasticsearch's folder permissions
 mkdir -p /var/lib/docker/volumes/elasticsearch/thehive/_data
@@ -98,89 +112,135 @@ EOF'
 ## CAPES Databases ##
 
 # Etherpad MYSQL Container
+if ! docker inspect /capes-etherpad-mysql > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-etherpad-mysql -v /var/lib/docker/volumes/mysql/etherpad/_data:/var/lib/mysql:z -e "MYSQL_DATABASE=etherpad" -e "MYSQL_USER=etherpad" -e MYSQL_PASSWORD=${etherpad_mysql_passphrase} -e "MYSQL_RANDOM_ROOT_PASSWORD=yes" mysql:${etherpad_mysql_ver}
+fi
 
 # Gitea MYSQL Container
+if ! docker inspect /capes-gitea-mysql > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-gitea-mysql -v /var/lib/docker/volumes/mysql/gitea/_data:/var/lib/mysql:z -e "MYSQL_DATABASE=gitea" -e "MYSQL_USER=gitea" -e MYSQL_PASSWORD=${gitea_mysql_passphrase} -e "MYSQL_RANDOM_ROOT_PASSWORD=yes" mysql:${gitea_mysql_ver}
+fi
 
 # TheHive & Cortex Elasticsearch Container
+if ! docker inspect /capes-thehive-elasticsearch > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-thehive-elasticsearch -v /var/lib/docker/volumes/elasticsearch/thehive/_data:/usr/share/elasticsearch/data:z -e "http.host=0.0.0.0" -e "transport.host=0.0.0.0" -e "xpack.security.enabled=false" -e "cluster.name=hive" -e "script.allowed_types=inline" -e "thread_pool.index.queue_size=100000" -e "thread_pool.search.queue_size=100000" -e "thread_pool.bulk.queue_size=100000" --ulimit nofile=65536:65536 docker.elastic.co/elasticsearch/elasticsearch:${thehive_elasticsearch_ver}
+fi
 
 # Rocketchat MongoDB Container & Configuration
+if ! docker inspect /capes-rocketchat-mongo > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-rocketchat-mongo -v /var/lib/docker/volumes/rocketchat/_data:/data/db:z -v /var/lib/docker/volumes/rocketchat/dump/_data:/dump:z mongo:${rocketchat_mongo_ver} mongod --smallfiles --oplogSize 128 --replSet rs1 --storageEngine=mmapv1
 sleep 5
 docker exec -d capes-rocketchat-mongo bash -c 'echo -e "replication:\n  replSetName: \"rs01\"" | tee -a /etc/mongod.conf && mongo --eval "printjson(rs.initiate())"'
+fi
 
 ## CAPES Services ##
 
 # Portainer Service
+if ! docker inspect /capes-portainer > /dev/null; then
 docker run --privileged -d --network capes --restart unless-stopped --name capes-portainer -v /var/lib/docker/volumes/portainer/_data:/data:z -v /var/run/docker.sock:/var/run/docker.sock portainer/portainer:${portainer_ver}
+fi
 
 # Nginx Service
+if ! docker inspect /capes-landing-page > /dev/null; then
 docker run -d  --network capes --restart unless-stopped --name capes-landing-page -v $(pwd)/nginx/ssl/capes.crt:/etc/nginx/capes.crt:z -v $(pwd)/nginx/ssl/capes.key:/etc/nginx/capes.key:z -v $(pwd)/nginx/nginx.conf:/etc/nginx/nginx.conf:z -v $(pwd)/nginx/landing_page:/usr/share/nginx/html:z -p 443:443 nginx:${nginx_ver}
+fi
 
 # Cyberchef Service
+if ! docker inspect /capes-cyberchef > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-cyberchef mpepping/cyberchef:${cyberchef_ver}
+fi
 
 # Gitea Service
+if ! docker inspect /capes-gitea > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-gitea -v /var/lib/docker/volumes/gitea/_data:/data:z -e "DB_TYPE=mysql" -e "DB_HOST=capes-gitea-mysql:3306" -e "DB_NAME=gitea" -e "DB_USER=gitea" -e DB_PASSWD=${gitea_mysql_passphrase} -p 2222:22 -p 3000:3000 gitea/gitea:${gitea_ver}
+fi
 
 # Etherpad Service
+if ! docker inspect /capes-etherpad > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-etherpad -e "ETHERPAD_TITLE=CAPES" -e "ETHERPAD_PORT=9001" -e ETHERPAD_ADMIN_PASSWORD=${etherpad_admin_passphrase} -e "ETHERPAD_ADMIN_USER=admin" -e "ETHERPAD_DB_TYPE=mysql" -e "ETHERPAD_DB_HOST=capes-etherpad-mysql" -e "ETHERPAD_DB_USER=etherpad" -e ETHERPAD_DB_PASSWORD=${etherpad_mysql_passphrase} -e "ETHERPAD_DB_NAME=etherpad" tvelocity/etherpad-lite:${etherpad_ver}
+fi
 
 # TheHive Service
 # Integrating Cortex with TheHive, read below
 # https://github.com/TheHive-Project/CortexDocs/blob/master/admin/quick-start.md#step-7-optional-create-an-account-for-thehive-integration
 # https://github.com/TheHive-Project/TheHiveDocs/blob/master/admin/configuration.md#6-cortex
+if ! docker inspect /capes-thehive > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-thehive -v $(pwd)/application.conf:/etc/thehive/application.conf:z thehiveproject/thehive:${thehive_ver} --es-hostname capes-thehive-elasticsearch
+fi
 
 # Cortex Service
 # Integrating Cortex with TheHive, read below
 # https://github.com/TheHive-Project/CortexDocs/blob/master/admin/quick-start.md#step-7-optional-create-an-account-for-thehive-integration
 # https://github.com/TheHive-Project/TheHiveDocs/blob/master/admin/configuration.md#6-cortex
+if ! docker inspect /capes-cortex > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-cortex thehiveproject/cortex:${cortex_ver} --es-hostname capes-thehive-elasticsearch
+fi
 
 # TheHive Template Import Preparation
-docker build -t capes/thehivetemplateimport .
+docker build --network host -t capes/thehivetemplateimport .
 
 # Draw.io Service
+if ! docker inspect /capes-draw.io > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-draw.io fjudith/draw.io:${drawio_ver}
+fi
 
 # Rocketchat Service
+if ! docker inspect /capes-rocketchat > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-rocketchat --link capes-rocketchat-mongo -e "MONGO_URL=mongodb://capes-rocketchat-mongo:27017/rocketchat" -e MONGO_OPLOG_URL=mongodb://capes-rocketchat-mongo:27017/local?replSet=rs01 -e ROOT_URL=http://${IP}:4000 -p 4000:3000 rocketchat/rocket.chat:${rocketchat_ver}
+fi
 
 # Mumble Service
+if ! docker inspect /capes-mumble > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-mumble -p 64738:64738 -p 64738:64738/udp -v /var/lib/docker/volumes/mumble-data/_data:/data:z -e SUPW=${mumble_passphrase} extra/mumble:${mumble_ver}
+fi
 
 ## CAPES Monitoring ##
 
 # CAPES Elasticsearch Nodes
+if ! docker inspect /capes-elasticsearch-1 > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-elasticsearch-1 -v /var/lib/docker/volumes/elasticsearch-1/capes/_data:/usr/share/elasticsearch/data:z --ulimit memlock=-1:-1 -p 127.0.0.1:9200:9200 -e "cluster.name=capes" -e "node.name=capes-elasticsearch-1" -e "cluster.initial_master_nodes=capes-elasticsearch-1" -e "bootstrap.memory_lock=true" -e "ES_JAVA_OPTS=-Xms512m -Xmx512m" docker.elastic.co/elasticsearch/elasticsearch:${capes_elasticsearch_ver}
+fi
 
+if ! docker inspect /capes-elasticsearch-2 > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-elasticsearch-2 -v /var/lib/docker/volumes/elasticsearch-2/capes/_data:/usr/share/elasticsearch/data:z --ulimit memlock=-1:-1 -e "cluster.name=capes" -e "node.name=capes-elasticsearch-2" -e "cluster.initial_master_nodes=capes-elasticsearch-1" -e "bootstrap.memory_lock=true" -e "ES_JAVA_OPTS=-Xms512m -Xmx512m" -e "discovery.seed_hosts=capes-elasticsearch-1,capes-elasticsearch-3" docker.elastic.co/elasticsearch/elasticsearch:${capes_elasticsearch_ver}
+fi
 
+if ! docker inspect /capes-elasticsearch-3 > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-elasticsearch-3 -v /var/lib/docker/volumes/elasticsearch-3/capes/_data:/usr/share/elasticsearch/data:z --ulimit memlock=-1:-1 -e "cluster.name=capes" -e "node.name=capes-elasticsearch-3" -e "cluster.initial_master_nodes=capes-elasticsearch-1" -e "bootstrap.memory_lock=true" -e "ES_JAVA_OPTS=-Xms512m -Xmx512m" -e "discovery.seed_hosts=capes-elasticsearch-1,capes-elasticsearch-2" docker.elastic.co/elasticsearch/elasticsearch:${capes_elasticsearch_ver}
+fi
 
 # CAPES Kibana
+if ! docker inspect /capes-kibana > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-kibana -e SERVER_BASEPATH=/kibana --link capes-elasticsearch-1:elasticsearch docker.elastic.co/kibana/kibana:${capes_kibana_ver}
+fi
 
 # CAPES Heartbeat
+if ! docker inspect /capes-heartbeat > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-heartbeat --user=heartbeat -v $(pwd)/heartbeat.yml:/usr/share/heartbeat/heartbeat.yml:z docker.elastic.co/beats/heartbeat:${capes_beats_ver} -e -E output.elasticsearch.hosts=["capes-elasticsearch-1:9200"]
+fi
 
 # CAPES Metricbeat
+if ! docker inspect /capes-metricbeat > /dev/null; then
 docker run -d --network capes --restart unless-stopped --name capes-metricbeat --user=root -v $(pwd)/metricbeat.yml:/usr/share/metricbeat/metricbeat.yml:z -v /var/run/docker.sock:/var/run/docker.sock:z -v /sys/fs/cgroup:/hostfs/sys/fs/cgroup:z -v /proc:/hostfs/proc:z -v /:/hostfs:z --privileged docker.elastic.co/beats/metricbeat:${capes_beats_ver} -e -E output.elasticsearch.hosts=["capes-elasticsearch-1:9200"]
+fi
 
 # CAPES Packetbeat
+if ! docker inspect /capes-packetbeat > /dev/null; then
 docker run -d --network host --restart unless-stopped --name capes-packetbeat -v $(pwd)/packetbeat.yml:/usr/share/packetbeat/packetbeat.yml:z --cap-add="NET_RAW" --cap-add="NET_ADMIN" docker.elastic.co/beats/packetbeat:${capes_beats_ver} --strict.perms=false -e -E output.elasticsearch.hosts=["127.0.0.1:9200"]
+fi
 
 # CAPES Auditbeat
+if ! docker inspect /capes-auditbeat > /dev/null; then
 docker run -d --network host --restart unless-stopped --name capes-auditbeat --user=root -v $(pwd)/auditbeat.yml:/usr/share/auditbeat/auditbeat.yml:z --pid=host --privileged=true docker.elastic.co/beats/auditbeat:${capes_beats_ver} --strict.perms=false -e -E output.elasticsearch.hosts=["127.0.0.1:9200"]
+fi
 
 # Wait for Elasticsearch to become available
 echo "Elasticsearch takes a bit to negotiate it's cluster settings and come up. Give it a minute."
 while true
 do
+  set +e
   STATUS=$(curl -sL -o /dev/null -w '%{http_code}' http://127.0.0.1:9200)
+  set -e
   if [ ${STATUS} -eq 200 ]; then
     echo "Elasticsearch is up. Proceeding"
     break
@@ -221,6 +281,5 @@ curl -X PUT "localhost:9200/_cluster/settings" -H 'Content-Type: application/jso
 ################################
 ######### Success Page #########
 ################################
-clear
 echo "Please see the "Build, Operate, Maintain" documentation for the post-installation steps."
 echo "The CAPES landing page has been successfully deployed. Browse to https://${HOSTNAME} (or https://${IP} if you don't have DNS set up) to begin using the services."

@@ -50,8 +50,8 @@ echo "${IP} ${HOSTNAME}" | tee -a /etc/hosts
 sed -i "s/host-ip/${HOSTNAME}/" nginx/landing_page/index.html
 
 # Create SSL certificates
-if false; then
 mkdir -p $(pwd)/nginx/ssl
+if false; then
 openssl req -newkey rsa:2048 -nodes -keyout $(pwd)/nginx/ssl/capes.key -x509 -sha256 -days 365 -out $(pwd)/nginx/ssl/capes.crt -subj "/C=US/ST=CAPES/L=CAPES/O=CAPES/OU=CAPES/CN=CAPES"
 fi
 

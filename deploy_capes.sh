@@ -177,6 +177,8 @@ docker run -d --network capes --restart unless-stopped --name capes-cortex thehi
 fi
 
 # TheHive Template Import Preparation
+cp -p /etc/pki/ca-trust/source/anchors/range.crt .
+cp -p /etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem ./cacert.pem
 docker build --network host -t capes/thehivetemplateimport .
 
 # Draw.io Service
